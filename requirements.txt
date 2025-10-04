@@ -1,17 +1,17 @@
 # Flask web framework
-Flask==2.3.3
+Flask
 
 # Allow cross-origin requests from frontend
-flask-cors==4.0.0
+flask-cors
 
 # Model serialization
-joblib==1.3.2
+joblib
 
 # VADER sentiment analyzer
-vaderSentiment==3.3.2
+vaderSentiment
 
 # Machine learning (Logistic Regression + vectorizer)
-scikit-learn==1.3.2
+scikit-learn
 
 # Production WSGI server
-gunicorn==21.2.0
+gunicorn
