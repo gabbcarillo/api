@@ -34,7 +34,7 @@ def clean_text(text):
 # 2. Load LR model + vectorizer
 # ---------------------------
 lr_model = joblib.load("sentiment_model_lr.pkl")
-vectorizer = joblib.load("vectorizer_lr.pkl")  # retrained with ngram_range=(1,2)
+vectorizer = joblib.load("vectorizer_lr.pkl")  # trained with ngram_range=(1,2)
 
 # ---------------------------
 # 3. Initialize VADER
@@ -63,35 +63,54 @@ def predict():
         lr_proba = lr_model.predict_proba(text_vec)[0]
         lr_classes = lr_model.classes_  # ['negative', 'neutral', 'positive']
 
-        # --- 2. VADER sentiment ---
+        # --- 2. Improved VADER sentiment with intensifier boosting ---
         vader_scores = analyzer.polarity_scores(text)
-        vader_proba = {
-            "negative": vader_scores['neg'],
-            "neutral": vader_scores['neu'],
-            "positive": vader_scores['pos']
-        }
 
-        # --- 3. Dynamic LR + VADER weighting ---
+        # Manually amplify when intensifiers present
+        intensity_multiplier = 1.0
+        if any(i in text.lower().split() for i in intensifiers):
+            intens_count = sum(text.lower().count(i) for i in intensifiers)
+            intensity_multiplier = 1.3 + (0.1 * intens_count)  # 1.3x for "very", stronger if repeated
+
+        # Apply boost based on polarity direction
+        compound = vader_scores['compound']
+        if compound > 0:
+            compound = min(compound * intensity_multiplier, 1.0)
+        elif compound < 0:
+            compound = max(compound * intensity_multiplier, -1.0)
+
+        # Recalculate adjusted scores proportionally
+        if compound >= 0.05:
+            vader_proba = {"positive": compound, "neutral": 1 - compound, "negative": 0}
+        elif compound <= -0.05:
+            vader_proba = {"negative": abs(compound), "neutral": 1 - abs(compound), "positive": 0}
+        else:
+            vader_proba = {"neutral": 1.0, "positive": 0, "negative": 0}
+
+        # --- 3. Combine LR + VADER ---
         rare_words = [w for w in cleaned_text.split() if w not in vectorizer.get_feature_names_out()]
-        alpha = 0.5 if rare_words else 0.7  # reduce LR weight if rare words present
-
+        alpha = 0.5 if rare_words else 0.6  # give more weight to VADER
         final_proba = {}
         for cls in lr_classes:
             final_proba[cls] = alpha * lr_proba[list(lr_classes).index(cls)] + (1 - alpha) * vader_proba.get(cls, 0.0)
 
-        # --- 4. Intensifier adjustment ---
-        if any(intens in lowered_text for intens in intensifiers):
-            if any(word in lowered_text for word in ["bad", "terrible", "awful"]):
-                final_proba["negative"] *= 1.2
-            if any(word in lowered_text for word in ["good", "great", "excellent"]):
-                final_proba["positive"] *= 1.2
+        # --- 4. Intensifier adjustment (stronger + position-based) ---
+        intensity_boost = 1.0
+        if any(i in lowered_text for i in intensifiers):
+            # Count how many intensifiers appear to adjust scale
+            intens_count = sum(lowered_text.count(i) for i in intensifiers)
+            intensity_boost = 1.1 + (0.1 * intens_count)  # "very" = +10%, "very very" = +20%
+
+            # Stronger scaling based on positive/negative terms nearby
+            if any(word in lowered_text for word in ["bad", "terrible", "awful", "poor", "horrible"]):
+                final_proba["negative"] *= intensity_boost
+            elif any(word in lowered_text for word in ["good", "great", "excellent", "amazing", "fantastic"]):
+                final_proba["positive"] *= intensity_boost
 
         # --- 5. Re-normalize probabilities ---
         total = sum(final_proba.values())
         if total > 0:
             final_proba = {k: v / total for k, v in final_proba.items()}
-        else:
-            final_proba = {k: 0.0 for k in lr_classes}
 
         # --- 6. Final prediction ---
         final_pred = max(final_proba, key=final_proba.get)
