@@ -4,49 +4,50 @@ import joblib
 import re
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# ---------------------------
-# 1. Negation + Intensifier Cleaning
-# ---------------------------
-negation_words = {'not', 'no', 'never'}
+
+# Keyword sets
+
 intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
+negation_words = {'not', 'no', 'never'}
+
+# Text cleaning function
 
 def clean_text(text):
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.lower()
-    text = re.sub(r'<.*?>', '', text)
+    text = re.sub(r'<.*?>', '', str(text).lower())
     text = re.sub(r'[^a-z\s]', '', text)
-    tokens = text.split()
+    return ' '.join(text.split())
 
-    new_tokens = []
-    i = 0
-    while i < len(tokens):
-        word = tokens[i]
-        if word in negation_words and i + 1 < len(tokens):
-            new_tokens.append(word + '_' + tokens[i + 1])
-            i += 2
-            continue
-        new_tokens.append(word)
-        i += 1
-    return ' '.join(new_tokens)
+# Load ML model and vectorizer
 
-# ---------------------------
-# 2. Load LR model + vectorizer
-# ---------------------------
 lr_model = joblib.load("sentiment_model_lr.pkl")
-vectorizer = joblib.load("vectorizer_lr.pkl")  # trained with ngram_range=(1,2)
+vectorizer = joblib.load("vectorizer_lr.pkl")
 
-# ---------------------------
-# 3. Initialize VADER
-# ---------------------------
+
+# Initialize VADER analyzer
 analyzer = SentimentIntensityAnalyzer()
+custom_words = {
+    "dependable": 2.5,
+    "reliable": 2.3,
+    "durable": 2.2,
+    "sturdy": 2.0,
+    "trustworthy": 2.4,
+    "efficient": 2.1,
+    "well-built": 2.2,
+    "long-lasting": 2.3,
+    "high-quality": 2.4,
+    "premium": 2.0,
+    "excellent": 3.0,
+    "worthwhile": 2.0,
+    "impressive": 2.5,
+    "strong": 2.0
+}
+analyzer.lexicon.update(custom_words)
 
-# ---------------------------
-# 4. Flask API
-# ---------------------------
+# Flask app
 app = Flask(__name__)
 CORS(app)
 
+# Sentiment prediction endpoint
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -55,31 +56,37 @@ def predict():
         if not text:
             return jsonify({"error": "No text provided"}), 400
 
-        lowered_text = text.lower()
+        lowered = text.lower()
 
-        # --- 1. LR prediction ---
-        cleaned_text = clean_text(text)
-        text_vec = vectorizer.transform([cleaned_text])
-        lr_proba = lr_model.predict_proba(text_vec)[0]
-        lr_classes = lr_model.classes_  # ['negative', 'neutral', 'positive']
+        # --- Step 1: Logistic Regression Prediction ---
+        cleaned = clean_text(text)
+        vec = vectorizer.transform([cleaned])
+        lr_proba = lr_model.predict_proba(vec)[0]
+        lr_classes = lr_model.classes_
 
-        # --- 2. Improved VADER sentiment with intensifier boosting ---
-        vader_scores = analyzer.polarity_scores(text)
+        # --- Step 2: VADER Base Analysis ---
+        vader = analyzer.polarity_scores(text)
+        compound = vader["compound"]
 
-        # Manually amplify when intensifiers present
-        intensity_multiplier = 1.0
-        if any(i in text.lower().split() for i in intensifiers):
-            intens_count = sum(text.lower().count(i) for i in intensifiers)
-            intensity_multiplier = 1.3 + (0.1 * intens_count)  # 1.3x for "very", stronger if repeated
+        # --- Step 3: Negation Correction (manual overrides) ---
+        if re.search(r"\bnot\s+bad\b", lowered):
+            compound = 0.6  # positive
+        elif re.search(r"\bnot\s+good\b", lowered):
+            compound = -0.6  # negative
+        elif re.search(r"\bnever\s+disappoint(s|ed|ing)?\b", lowered):
+            compound = 0.7
+        elif re.search(r"\bnot\s+terrible\b", lowered):
+            compound = 0.6
+        elif re.search(r"\bnot\s+horrible\b", lowered):
+            compound = 0.6
 
-        # Apply boost based on polarity direction
-        compound = vader_scores['compound']
-        if compound > 0:
-            compound = min(compound * intensity_multiplier, 1.0)
-        elif compound < 0:
-            compound = max(compound * intensity_multiplier, -1.0)
+        # --- Step 4: Intensifier Amplification ---
+        if any(i in lowered.split() for i in intensifiers):
+            intens_count = sum(lowered.count(i) for i in intensifiers)
+            multiplier = 1.3 + (0.05 * intens_count)
+            compound = max(-1.0, min(compound * multiplier, 1.0))
 
-        # Recalculate adjusted scores proportionally
+        # --- Step 5: Convert VADER compound to probabilities ---
         if compound >= 0.05:
             vader_proba = {"positive": compound, "neutral": 1 - compound, "negative": 0}
         elif compound <= -0.05:
@@ -87,42 +94,33 @@ def predict():
         else:
             vader_proba = {"neutral": 1.0, "positive": 0, "negative": 0}
 
-        # --- 3. Combine LR + VADER ---
-        rare_words = [w for w in cleaned_text.split() if w not in vectorizer.get_feature_names_out()]
-        alpha = 0.5 if rare_words else 0.6  # give more weight to VADER
+        # --- Step 6: Combine (VADER Dominant) ---
+        # alpha controls how much weight VADER gets (higher = more dominant)
+        alpha = 0.85  # 85% VADER, 15% LR
         final_proba = {}
         for cls in lr_classes:
-            final_proba[cls] = alpha * lr_proba[list(lr_classes).index(cls)] + (1 - alpha) * vader_proba.get(cls, 0.0)
+            final_proba[cls] = alpha * vader_proba.get(cls, 0.0) + \
+                               (1 - alpha) * lr_proba[list(lr_classes).index(cls)]
 
-        # --- 4. Intensifier adjustment (stronger + position-based) ---
-        intensity_boost = 1.0
-        if any(i in lowered_text for i in intensifiers):
-            # Count how many intensifiers appear to adjust scale
-            intens_count = sum(lowered_text.count(i) for i in intensifiers)
-            intensity_boost = 1.1 + (0.1 * intens_count)  # "very" = +10%, "very very" = +20%
-
-            # Stronger scaling based on positive/negative terms nearby
-            if any(word in lowered_text for word in ["bad", "terrible", "awful", "poor", "horrible"]):
-                final_proba["negative"] *= intensity_boost
-            elif any(word in lowered_text for word in ["good", "great", "excellent", "amazing", "fantastic"]):
-                final_proba["positive"] *= intensity_boost
-
-        # --- 5. Re-normalize probabilities ---
+        # --- Step 7: Normalize ---
         total = sum(final_proba.values())
         if total > 0:
             final_proba = {k: v / total for k, v in final_proba.items()}
 
-        # --- 6. Final prediction ---
-        final_pred = max(final_proba, key=final_proba.get)
+        # --- Step 8: Determine Final Sentiment ---
+        result = max(final_proba, key=final_proba.get)
 
+        # --- Step 9: Response ---
         return jsonify({
-            "sentiment": final_pred,
-            "confidence": round(float(final_proba[final_pred]), 2),
-            "probabilities": final_proba
+            "sentiment": result,
+            "confidence": round(float(final_proba[result]), 2),
+            "probabilities": final_proba,
+            "compound": round(compound, 3)
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Run API
 if __name__ == "__main__":
     app.run(debug=True)
