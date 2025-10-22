@@ -1,17 +1,17 @@
 # ---------------- Imports ----------------
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import os, re, joblib, json, threading, random
+import os, re, joblib, json, random, threading
 import pandas as pd
 from datetime import datetime
 from collections import Counter
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from nltk.corpus import stopwords, opinion_lexicon
-from nltk.stem import WordNetLemmatizer
-from nltk import word_tokenize, pos_tag
 from wordcloud import WordCloud
 from langdetect import detect, LangDetectException
 import nltk
+from nltk.corpus import stopwords, opinion_lexicon
+from nltk.stem import WordNetLemmatizer
+from nltk import word_tokenize, pos_tag
 
 # ---------------- Flask Setup ----------------
 app = Flask(__name__)
@@ -33,22 +33,12 @@ stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 analyzer = SentimentIntensityAnalyzer()
 
-# Custom lexicon (from your real-time model)
+# ---------------- Custom Lexicon ----------------
 custom_words = {
-    "dependable": 2.5,
-    "reliable": 2.3,
-    "durable": 2.2,
-    "sturdy": 2.0,
-    "trustworthy": 2.4,
-    "efficient": 2.1,
-    "well-built": 2.2,
-    "long-lasting": 2.3,
-    "high-quality": 2.4,
-    "premium": 2.0,
-    "excellent": 3.0,
-    "worthwhile": 2.0,
-    "impressive": 2.5,
-    "strong": 2.0
+    "dependable": 2.5, "reliable": 2.3, "durable": 2.2, "sturdy": 2.0,
+    "trustworthy": 2.4, "efficient": 2.1, "well-built": 2.2, "long-lasting": 2.3,
+    "high-quality": 2.4, "premium": 2.0, "excellent": 3.0, "worthwhile": 2.0,
+    "impressive": 2.5, "strong": 2.0
 }
 analyzer.lexicon.update(custom_words)
 
@@ -56,30 +46,53 @@ analyzer.lexicon.update(custom_words)
 lr_model = joblib.load("sentiment_model_lr.pkl")
 vectorizer = joblib.load("vectorizer_lr.pkl")
 
+# ---------------- Keywords ----------------
 intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
+negation_words = {'not', 'no', 'never'}
 
-# ---------------- Shared Functions ----------------
+# ---------------- Shared Helper Functions ----------------
 def clean_text(text):
     if not isinstance(text, str):
         text = str(text)
-    text = text.lower()
-    text = re.sub(r'<.*?>', '', text)
+    text = re.sub(r'<.*?>', '', text.lower())
     text = re.sub(r'[^a-z\s]', '', text)
     tokens = word_tokenize(text)
     tokens = [lemmatizer.lemmatize(w) for w in tokens if w not in stop_words]
     return " ".join(tokens)
 
-def is_english(text):
-    try:
-        return detect(text) == "en"
-    except LangDetectException:
-        return False
+def get_sentiment(text):
+    if isinstance(text, str):
+        score = analyzer.polarity_scores(text)['compound']
+        if score >= 0.05:
+            return 'positive'
+        elif score <= -0.05:
+            return 'negative'
+        else:
+            return 'neutral'
+    return 'neutral'
+
+def extract_opinion_adjectives(text):
+    if pd.isna(text):
+        return []
+    tagged = pos_tag(word_tokenize(str(text).lower()))
+    words = []
+    for word, tag in tagged:
+        if tag.startswith("JJ") and word != "purifier":
+            if (word in opinion_lexicon.positive()) or (word in opinion_lexicon.negative()):
+                words.append(word)
+    return words
 
 def count_sentences(text):
     if not text or not isinstance(text, str):
         return 0
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     return len([s for s in sentences if s])
+
+def is_english(text):
+    try:
+        return detect(text) == "en"
+    except LangDetectException:
+        return False
 
 # ---------------- Real-Time Prediction ----------------
 @app.route("/predict", methods=["POST"])
@@ -90,19 +103,37 @@ def predict():
         if not text:
             return jsonify({"error": "No text provided"}), 400
 
+        lowered = text.lower()
+
+        # Logistic Regression Prediction
         cleaned = clean_text(text)
         vec = vectorizer.transform([cleaned])
         lr_proba = lr_model.predict_proba(vec)[0]
         lr_classes = lr_model.classes_
 
+        # VADER Analysis
         vader = analyzer.polarity_scores(text)
         compound = vader["compound"]
 
-        if any(i in text.lower().split() for i in intensifiers):
-            intens_count = sum(text.lower().count(i) for i in intensifiers)
+        # Negation Correction
+        if re.search(r"\bnot\s+bad\b", lowered):
+            compound = 0.6
+        elif re.search(r"\bnot\s+good\b", lowered):
+            compound = -0.6
+        elif re.search(r"\bnever\s+disappoint(s|ed|ing)?\b", lowered):
+            compound = 0.7
+        elif re.search(r"\bnot\s+terrible\b", lowered):
+            compound = 0.6
+        elif re.search(r"\bnot\s+horrible\b", lowered):
+            compound = 0.6
+
+        # Intensifier Amplification
+        if any(i in lowered.split() for i in intensifiers):
+            intens_count = sum(lowered.count(i) for i in intensifiers)
             multiplier = 1.3 + (0.05 * intens_count)
             compound = max(-1.0, min(compound * multiplier, 1.0))
 
+        # Convert VADER to probabilities
         if compound >= 0.05:
             vader_proba = {"positive": compound, "neutral": 1 - compound, "negative": 0}
         elif compound <= -0.05:
@@ -110,10 +141,12 @@ def predict():
         else:
             vader_proba = {"neutral": 1.0, "positive": 0, "negative": 0}
 
+        # Combine (VADER-dominant)
         alpha = 0.85
         final_proba = {}
         for cls in lr_classes:
-            final_proba[cls] = alpha * vader_proba.get(cls, 0.0) + (1 - alpha) * lr_proba[list(lr_classes).index(cls)]
+            final_proba[cls] = alpha * vader_proba.get(cls, 0.0) + \
+                               (1 - alpha) * lr_proba[list(lr_classes).index(cls)]
 
         total = sum(final_proba.values())
         if total > 0:
@@ -131,7 +164,52 @@ def predict():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ---------------- Upload + Auto-Update ----------------
+# ---------------- Dashboard Builder ----------------
+def build_dashboard(product_name, merged_df):
+    try:
+        if "sentiment" not in merged_df.columns:
+            print(f"⚠️ Skipping {product_name}: no sentiment column found.")
+            return
+
+        counts = merged_df["sentiment"].str.lower().value_counts(normalize=True) * 100
+        pos, neg, neu = round(counts.get("positive", 0)), round(counts.get("negative", 0)), round(counts.get("neutral", 0))
+        avg_rating = round(5 * ((pos + 0.5 * neu) / 100), 2)
+
+        adj_counter = Counter()
+        for r in merged_df["cleaned_text"]:
+            adj_counter.update(extract_opinion_adjectives(r))
+
+        wc = WordCloud(background_color="white", width=600, height=400)
+        wc.generate_from_frequencies(adj_counter)
+        wc_file = os.path.join(DASHBOARD_FOLDER, f"{product_name}_wc.png")
+        wc.to_file(wc_file)
+
+        if "review_text" in merged_df.columns:
+            positive_reviews = merged_df[merged_df["sentiment"].str.lower() == "positive"]["review_text"].dropna().tolist()
+            english_reviews = [r for r in positive_reviews if is_english(r)]
+            short_reviews = [r for r in english_reviews if count_sentences(r) <= 4]
+            sample_reviews = random.sample(short_reviews, min(3, len(short_reviews))) if short_reviews else []
+        else:
+            sample_reviews = []
+
+        summary = {
+            "product_name": product_name.replace("_", " "),
+            "avg_rating": avg_rating,
+            "sentiment_breakdown": {"positive": int(pos), "negative": int(neg), "neutral": int(neu)},
+            "customer_descriptions": [{"label": w, "percent": c} for w, c in adj_counter.most_common(10)],
+            "sample_reviews": sample_reviews,
+            "wordcloud_file": f"{product_name}_wc.png"
+        }
+
+        json_file = os.path.join(DASHBOARD_FOLDER, f"{product_name}.json")
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=4, ensure_ascii=False)
+
+        print(f"✅ Dashboard updated for {product_name}")
+    except Exception as e:
+        print(f"❌ Error building dashboard for {product_name}: {e}")
+
+# ---------------- Upload & Auto Update ----------------
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if "file" not in request.files:
@@ -149,7 +227,6 @@ def upload_file():
     file_path = os.path.join(folder_path, file.filename)
     file.save(file_path)
 
-    # Process all files
     all_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".xlsx")]
     merged_df_list = []
 
@@ -158,10 +235,9 @@ def upload_file():
             sheets = pd.read_excel(fpath, sheet_name=None)
             for _, df in sheets.items():
                 if "review_text" in df.columns:
-                    df = df[df["review_text"].notna() & df["review_text"].str.strip().ne("")]
+                    df = df[df["review_text"].astype(str).str.strip().ne("")]
                     df["cleaned_text"] = df["review_text"].apply(clean_text)
-                    df["sentiment"] = df["cleaned_text"].apply(lambda t: analyzer.polarity_scores(t)["compound"])
-                    df["sentiment"] = df["sentiment"].apply(lambda s: "positive" if s >= 0.05 else "negative" if s <= -0.05 else "neutral")
+                    df["sentiment"] = df["cleaned_text"].apply(get_sentiment)
                     merged_df_list.append(df[["review_text", "cleaned_text", "sentiment"]])
         except Exception as e:
             print(f"Skipping file {fpath}: {e}")
@@ -175,39 +251,36 @@ def upload_file():
         merged_df.to_excel(writer, index=False)
 
     threading.Thread(target=build_dashboard, args=(product_name, merged_df)).start()
-    return jsonify({"status": "success", "message": f"{product_name} uploaded and processed."})
 
-# ---------------- Dashboard Builder ----------------
-def build_dashboard(product_name, merged_df):
-    counts = merged_df["sentiment"].value_counts(normalize=True) * 100
-    pos, neg, neu = round(counts.get("positive", 0)), round(counts.get("negative", 0)), round(counts.get("neutral", 0))
-    avg_rating = round(5 * ((pos + 0.5 * neu) / 100), 2)
+    return jsonify({
+        "status": "success",
+        "message": f"{product_name} uploaded, merged, and processed. Dashboard updating.",
+        "excel_output": final_path
+    })
 
-    adj_counter = Counter()
-    for text in merged_df["cleaned_text"]:
-        tagged = pos_tag(word_tokenize(text))
-        adj_counter.update([w for w, t in tagged if t.startswith("JJ")])
+# ---------------- Upload History ----------------
+@app.route("/uploaded_files", methods=["GET"])
+def uploaded_files():
+    uploads = []
+    for product_folder in os.listdir(UPLOAD_FOLDER):
+        folder_path = os.path.join(UPLOAD_FOLDER, product_folder)
+        if os.path.isdir(folder_path):
+            for file in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, file)
+                if os.path.isfile(file_path):
+                    upload_time = os.path.getmtime(file_path)
+                    uploads.append({
+                        "product": product_folder.replace("_", " "),
+                        "filename": file,
+                        "upload_date": datetime.fromtimestamp(upload_time).strftime("%Y-%m-%d %H:%M:%S")
+                    })
+    uploads.sort(key=lambda x: x["upload_date"], reverse=True)
+    return jsonify(uploads)
 
-    wc = WordCloud(background_color="white", width=600, height=400)
-    wc.generate_from_frequencies(adj_counter)
-    wc_file = os.path.join(DASHBOARD_FOLDER, f"{product_name}_wc.png")
-    wc.to_file(wc_file)
-
-    positive_reviews = merged_df[merged_df["sentiment"] == "positive"]["review_text"].tolist()
-    english_reviews = [r for r in positive_reviews if is_english(r)]
-    short_reviews = [r for r in english_reviews if count_sentences(r) <= 4]
-    sample_reviews = random.sample(short_reviews, min(3, len(short_reviews))) if short_reviews else []
-
-    summary = {
-        "product_name": product_name.replace("_", " "),
-        "avg_rating": avg_rating,
-        "sentiment_breakdown": {"positive": pos, "negative": neg, "neutral": neu},
-        "customer_descriptions": [{"label": w, "percent": c} for w, c in adj_counter.most_common(10)],
-        "sample_reviews": sample_reviews
-    }
-
-    with open(os.path.join(DASHBOARD_FOLDER, f"{product_name}.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=4, ensure_ascii=False)
+# ---------------- Serve Dashboard Files ----------------
+@app.route("/dashboard_data/<path:filename>")
+def serve_dashboard_file(filename):
+    return send_from_directory(DASHBOARD_FOLDER, filename)
 
 # ---------------- Run App ----------------
 if __name__ == "__main__":
