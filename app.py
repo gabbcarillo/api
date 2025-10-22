@@ -17,6 +17,13 @@ from wordcloud import WordCloud
 from langdetect import detect, LangDetectException
 import joblib
 
+# ---------------- NLTK Downloads (moved to top) ----------------
+nltk.download('stopwords')
+nltk.download('punkt')
+nltk.download('wordnet')
+nltk.download('opinion_lexicon')
+nltk.download('averaged_perceptron_tagger')
+
 # ---------------- Keyword Sets ----------------
 intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
 negation_words = {'not', 'no', 'never'}
@@ -31,15 +38,10 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DASHBOARD_FOLDER, exist_ok=True)
 
 # ---------------- NLP Setup ----------------
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('wordnet')
-nltk.download('opinion_lexicon')
-nltk.download('averaged_perceptron_tagger')
-
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 analyzer = SentimentIntensityAnalyzer()
+
 
 # ---------------- Custom Lexicon ----------------
 custom_words = {
@@ -285,3 +287,4 @@ def serve_dashboard_file(filename):
 # ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
