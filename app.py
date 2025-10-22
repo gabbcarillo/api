@@ -1,17 +1,25 @@
-# ---------------- Imports ----------------
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import os, re, joblib, json, random, threading
+import os
 import pandas as pd
+import nltk
+import re
+import json
+import random
+import threading
 from datetime import datetime
 from collections import Counter
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from wordcloud import WordCloud
-from langdetect import detect, LangDetectException
-import nltk
 from nltk.corpus import stopwords, opinion_lexicon
 from nltk.stem import WordNetLemmatizer
 from nltk import word_tokenize, pos_tag
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from wordcloud import WordCloud
+from langdetect import detect, LangDetectException
+import joblib
+
+# ---------------- Keyword Sets ----------------
+intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
+negation_words = {'not', 'no', 'never'}
 
 # ---------------- Flask Setup ----------------
 app = Flask(__name__)
@@ -42,15 +50,11 @@ custom_words = {
 }
 analyzer.lexicon.update(custom_words)
 
-# ---------------- Load Model ----------------
+# ---------------- Load ML Model ----------------
 lr_model = joblib.load("sentiment_model_lr.pkl")
 vectorizer = joblib.load("vectorizer_lr.pkl")
 
-# ---------------- Keywords ----------------
-intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
-negation_words = {'not', 'no', 'never'}
-
-# ---------------- Shared Helper Functions ----------------
+# ---------------- Helper Functions ----------------
 def clean_text(text):
     if not isinstance(text, str):
         text = str(text)
@@ -104,18 +108,14 @@ def predict():
             return jsonify({"error": "No text provided"}), 400
 
         lowered = text.lower()
-
-        # Logistic Regression Prediction
         cleaned = clean_text(text)
         vec = vectorizer.transform([cleaned])
         lr_proba = lr_model.predict_proba(vec)[0]
         lr_classes = lr_model.classes_
 
-        # VADER Analysis
         vader = analyzer.polarity_scores(text)
         compound = vader["compound"]
 
-        # Negation Correction
         if re.search(r"\bnot\s+bad\b", lowered):
             compound = 0.6
         elif re.search(r"\bnot\s+good\b", lowered):
@@ -127,13 +127,11 @@ def predict():
         elif re.search(r"\bnot\s+horrible\b", lowered):
             compound = 0.6
 
-        # Intensifier Amplification
         if any(i in lowered.split() for i in intensifiers):
             intens_count = sum(lowered.count(i) for i in intensifiers)
             multiplier = 1.3 + (0.05 * intens_count)
             compound = max(-1.0, min(compound * multiplier, 1.0))
 
-        # Convert VADER to probabilities
         if compound >= 0.05:
             vader_proba = {"positive": compound, "neutral": 1 - compound, "negative": 0}
         elif compound <= -0.05:
@@ -141,7 +139,6 @@ def predict():
         else:
             vader_proba = {"neutral": 1.0, "positive": 0, "negative": 0}
 
-        # Combine (VADER-dominant)
         alpha = 0.85
         final_proba = {}
         for cls in lr_classes:
@@ -172,12 +169,15 @@ def build_dashboard(product_name, merged_df):
             return
 
         counts = merged_df["sentiment"].str.lower().value_counts(normalize=True) * 100
-        pos, neg, neu = round(counts.get("positive", 0)), round(counts.get("negative", 0)), round(counts.get("neutral", 0))
+        pos = round(counts.get("positive", 0))
+        neg = round(counts.get("negative", 0))
+        neu = round(counts.get("neutral", 0))
         avg_rating = round(5 * ((pos + 0.5 * neu) / 100), 2)
 
         adj_counter = Counter()
         for r in merged_df["cleaned_text"]:
             adj_counter.update(extract_opinion_adjectives(r))
+        top_adjs = [{"label": w, "percent": c} for w, c in adj_counter.most_common(10)]
 
         wc = WordCloud(background_color="white", width=600, height=400)
         wc.generate_from_frequencies(adj_counter)
@@ -196,7 +196,7 @@ def build_dashboard(product_name, merged_df):
             "product_name": product_name.replace("_", " "),
             "avg_rating": avg_rating,
             "sentiment_breakdown": {"positive": int(pos), "negative": int(neg), "neutral": int(neu)},
-            "customer_descriptions": [{"label": w, "percent": c} for w, c in adj_counter.most_common(10)],
+            "customer_descriptions": top_adjs,
             "sample_reviews": sample_reviews,
             "wordcloud_file": f"{product_name}_wc.png"
         }
@@ -209,7 +209,7 @@ def build_dashboard(product_name, merged_df):
     except Exception as e:
         print(f"❌ Error building dashboard for {product_name}: {e}")
 
-# ---------------- Upload & Auto Update ----------------
+# ---------------- Upload & Processing Route ----------------
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if "file" not in request.files:
@@ -235,7 +235,7 @@ def upload_file():
             sheets = pd.read_excel(fpath, sheet_name=None)
             for _, df in sheets.items():
                 if "review_text" in df.columns:
-                    df = df[df["review_text"].astype(str).str.strip().ne("")]
+                    df = df[df["review_text"].notna() & df["review_text"].str.strip().ne("")].copy()
                     df["cleaned_text"] = df["review_text"].apply(clean_text)
                     df["sentiment"] = df["cleaned_text"].apply(get_sentiment)
                     merged_df_list.append(df[["review_text", "cleaned_text", "sentiment"]])
@@ -258,7 +258,7 @@ def upload_file():
         "excel_output": final_path
     })
 
-# ---------------- Upload History ----------------
+# ---------------- Upload History Route ----------------
 @app.route("/uploaded_files", methods=["GET"])
 def uploaded_files():
     uploads = []
@@ -282,6 +282,6 @@ def uploaded_files():
 def serve_dashboard_file(filename):
     return send_from_directory(DASHBOARD_FOLDER, filename)
 
-# ---------------- Run App ----------------
+# ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(debug=True)
