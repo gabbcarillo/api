@@ -17,9 +17,11 @@ from wordcloud import WordCloud
 from langdetect import detect, LangDetectException
 import joblib
 
-# ---------------- NLTK Downloads (moved to top) ----------------
+# ---------------- NLTK Downloads (moved to top + FIXED) ----------------
+nltk.data.path.append(os.path.join(os.getcwd(), 'nltk_data'))  # ✅ Ensures Render can find data
 nltk.download('stopwords')
 nltk.download('punkt')
+nltk.download('punkt_tab')  # ✅ REQUIRED for latest NLTK (fixes your "punkt_tab not found" error)
 nltk.download('wordnet')
 nltk.download('opinion_lexicon')
 nltk.download('averaged_perceptron_tagger')
@@ -41,7 +43,6 @@ os.makedirs(DASHBOARD_FOLDER, exist_ok=True)
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 analyzer = SentimentIntensityAnalyzer()
-
 
 # ---------------- Custom Lexicon ----------------
 custom_words = {
@@ -287,4 +288,3 @@ def serve_dashboard_file(filename):
 # ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(debug=True)
-
