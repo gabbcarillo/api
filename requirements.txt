@@ -1,17 +1,12 @@
-# Flask web framework
 Flask
-
-# Allow cross-origin requests from frontend
 flask-cors
-
-# Model serialization
 joblib
-
-# VADER sentiment analyzer
-vaderSentiment
-
-# Machine learning (Logistic Regression + vectorizer)
 scikit-learn
-
-# Production WSGI server
+vaderSentiment
+nltk
+wordcloud
+langdetect
+pandas
+openpyxl
 gunicorn
+regex
