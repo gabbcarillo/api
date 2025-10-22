@@ -18,13 +18,17 @@ from langdetect import detect, LangDetectException
 import joblib
 
 # ---------------- NLTK Downloads (moved to top + FIXED) ----------------
+# ---------------- NLTK Downloads (moved to top + FIXED) ----------------
 nltk.data.path.append(os.path.join(os.getcwd(), 'nltk_data'))  # ✅ Ensures Render can find data
-nltk.download('stopwords')
-nltk.download('punkt')
-nltk.download('punkt_tab')  # ✅ REQUIRED for latest NLTK (fixes your "punkt_tab not found" error)
-nltk.download('wordnet')
-nltk.download('opinion_lexicon')
-nltk.download('averaged_perceptron_tagger')
+
+# Download all required resources
+nltk.download('stopwords', quiet=True)
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)  # Fixes "punkt_tab not found"
+nltk.download('wordnet', quiet=True)
+nltk.download('opinion_lexicon', quiet=True)
+nltk.download('averaged_perceptron_tagger_eng', quiet=True)  # Fixes your "Resource not found" error
+
 
 # ---------------- Keyword Sets ----------------
 intensifiers = {'very', 'extremely', 'really', 'super', 'so', 'too'}
@@ -288,3 +292,4 @@ def serve_dashboard_file(filename):
 # ---------------- Main ----------------
 if __name__ == "__main__":
     app.run(debug=True)
+
